@@ -1,9 +1,5 @@
 package subsquid
 
-// NOTE: These are intentionally minimal and aligned with Subsquid Network
-// EVM Gateway v2 semantics (Router/Worker). The selector/response fields
-// can be extended as needed.
-
 type RouterHeightResp struct {
 	Height uint64 `json:"height"`
 }
@@ -14,14 +10,13 @@ type WorkerQuery struct {
 	Fields    *FieldSelector `json:"fields,omitempty"`
 	Logs      *LogsSelector  `json:"logs,omitempty"`
 	Traces    *TracesSelector`json:"traces,omitempty"`
-	// Transactions, StateDiffs can be added later
 }
 
 type FieldSelector struct {
-	Header       *HeaderFields       `json:"header,omitempty"`
-	Log          *LogFields          `json:"log,omitempty"`
-	Trace        *TraceFields        `json:"trace,omitempty"`
-	Transaction  *TransactionFields  `json:"transaction,omitempty"`
+	Header      *HeaderFields      `json:"header,omitempty"`
+	Log         *LogFields         `json:"log,omitempty"`
+	Trace       *TraceFields       `json:"trace,omitempty"`
+	Transaction *TransactionFields `json:"transaction,omitempty"`
 }
 
 type HeaderFields struct {
@@ -37,7 +32,7 @@ type LogFields struct {
 	Data            bool `json:"data,omitempty"`
 	BlockNumber     bool `json:"blockNumber,omitempty"`
 	TransactionHash bool `json:"transactionHash,omitempty"`
-	TxIndex         bool `json:"transactionIndex,omitempty"`
+	TransactionIndex bool `json:"transactionIndex,omitempty"`
 	LogIndex        bool `json:"logIndex,omitempty"`
 }
 
@@ -52,48 +47,40 @@ type TraceFields struct {
 	TransactionHash bool `json:"transactionHash,omitempty"`
 	TraceAddress    bool `json:"traceAddress,omitempty"`
 	Error           bool `json:"error,omitempty"`
-	// Add when needed: substate, callType, etc.
 }
 
 type TransactionFields struct {
-	Hash        bool `json:"hash,omitempty"`
-	BlockNumber bool `json:"blockNumber,omitempty"`
-	From        bool `json:"from,omitempty"`
-	To          bool `json:"to,omitempty"`
-	Index       bool `json:"transactionIndex,omitempty"`
+	Hash            bool `json:"hash,omitempty"`
+	BlockNumber     bool `json:"blockNumber,omitempty"`
+	From            bool `json:"from,omitempty"`
+	To              bool `json:"to,omitempty"`
+	TransactionIndex bool `json:"transactionIndex,omitempty"`
 }
 
-// LogsSelector mirrors eth_getLogs filter semantics.
 type LogsSelector struct {
-	// single or multiple addresses; lower-cased
 	Address []string `json:"address,omitempty"`
-	// topics: null/wildcards map to absence of that topic key
-	Topic0 []string `json:"topic0,omitempty"`
-	Topic1 []string `json:"topic1,omitempty"`
-	Topic2 []string `json:"topic2,omitempty"`
-	Topic3 []string `json:"topic3,omitempty"`
+	Topic0  []string `json:"topic0,omitempty"`
+	Topic1  []string `json:"topic1,omitempty"`
+	Topic2  []string `json:"topic2,omitempty"`
+	Topic3  []string `json:"topic3,omitempty"`
 }
 
-// TracesSelector – extend as needed (from/to/codeHash/sighash filters, etc.)
 type TracesSelector struct {
-	From       []string `json:"from,omitempty"`
-	To         []string `json:"to,omitempty"`
-	Sighash    []string `json:"sighash,omitempty"`
-	Type       []string `json:"type,omitempty"` // call/create/selfdestruct, etc.
-	// Add block/tx constraints via FromBlock/ToBlock at top-level WorkerQuery
+	From    []string `json:"from,omitempty"`
+	To      []string `json:"to,omitempty"`
+	Sighash []string `json:"sighash,omitempty"`
+	Type    []string `json:"type,omitempty"`
 }
 
-// WorkerResponse is a page of blocks; each entry has header, optionally logs/traces/etc.
 type WorkerResponse struct {
 	Items []BlockSlice `json:"items"`
 }
 
 type BlockSlice struct {
-	Header       *Header        `json:"header,omitempty"`
-	Logs         []Log          `json:"logs,omitempty"`
-	Traces       []Trace        `json:"traces,omitempty"`
-	Transactions []Transaction  `json:"transactions,omitempty"`
-	// StateDiffs omitted for now
+	Header       *Header       `json:"header,omitempty"`
+	Logs         []Log         `json:"logs,omitempty"`
+	Traces       []Trace       `json:"traces,omitempty"`
+	Transactions []Transaction `json:"transactions,omitempty"`
 }
 
 type Header struct {
@@ -104,20 +91,20 @@ type Header struct {
 }
 
 type Log struct {
-	Address         string   `json:"address"`
-	Topics          []string `json:"topics"`
-	Data            string   `json:"data"`
-	BlockNumber     uint64   `json:"blockNumber"`
-	TransactionHash string   `json:"transactionHash"`
-	TransactionIndex uint32  `json:"transactionIndex"`
-	LogIndex        uint32   `json:"logIndex"`
+	Address          string   `json:"address"`
+	Topics           []string `json:"topics"`
+	Data             string   `json:"data"`
+	BlockNumber      uint64   `json:"blockNumber"`
+	TransactionHash  string   `json:"transactionHash"`
+	TransactionIndex uint32   `json:"transactionIndex"`
+	LogIndex         uint32   `json:"logIndex"`
 }
 
 type Trace struct {
 	Type            string   `json:"type,omitempty"`
 	From            string   `json:"from,omitempty"`
 	To              string   `json:"to,omitempty"`
-	Value           string   `json:"value,omitempty"` // hex string per Subsquid
+	Value           string   `json:"value,omitempty"`
 	Input           string   `json:"input,omitempty"`
 	Output          string   `json:"output,omitempty"`
 	BlockNumber     uint64   `json:"blockNumber"`
@@ -134,20 +121,19 @@ type Transaction struct {
 	TransactionIndex uint32 `json:"transactionIndex,omitempty"`
 }
 
-// --- JSON-RPC plumbing ---
-
+// JSON-RPC shim used by the adapter.
 type JSONRPCRequest struct {
-	Jsonrpc string           `json:"jsonrpc"`
-	ID      interface{}      `json:"id"`
-	Method  string           `json:"method"`
-	Params  []any            `json:"params"`
+	Jsonrpc string      `json:"jsonrpc"`
+	ID      interface{} `json:"id"`
+	Method  string      `json:"method"`
+	Params  []any       `json:"params"`
 }
 
 type JSONRPCResponse struct {
-	Jsonrpc string           `json:"jsonrpc"`
-	ID      interface{}      `json:"id"`
-	Result  any              `json:"result,omitempty"`
-	Error   *JSONRPCError    `json:"error,omitempty"`
+	Jsonrpc string         `json:"jsonrpc"`
+	ID      interface{}    `json:"id"`
+	Result  any            `json:"result,omitempty"`
+	Error   *JSONRPCError  `json:"error,omitempty"`
 }
 
 type JSONRPCError struct {
