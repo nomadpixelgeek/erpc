@@ -200,6 +200,61 @@ projects:
             backoffMaxDelay: 10s
             backoffFactor: 0.3
             jitter: 500ms
+      # Subsquid Network — BASE
+      - id: subsquid-base
+        type: evm
+        endpoint: subsquid://v2.archive.subsquid.io/network/base-mainnet
+        evm:
+          chainId: 8453
+        # Let JSON-RPC handle "hot" / stateful methods; this upstream is finalized history
+        ignoreMethods:
+          - "eth_call"
+          - "eth_getBalance"
+          - "eth_getCode"
+          - "eth_getTransactionByHash"
+          - "eth_getTransactionReceipt"
+          - "eth_getBlockByHash"
+          - "eth_getBlockReceipts"
+          - "eth_getUncle*"
+          - "eth_feeHistory"
+          - "eth_gasPrice"
+          - "eth_maxPriorityFeePerGas"
+          - "eth_blockNumber" # optional: if you want blockNumber from live rpc; else remove to use Subsquid finalized height
+        # Tuning
+        maxChunk: 10000
+        timeout: 30s
+
+      # Subsquid Network — BSC
+      - id: subsquid-bsc
+        type: evm
+        endpoint: subsquid://v2.archive.subsquid.io/network/bsc-mainnet
+        evm:
+          chainId: 56
+        ignoreMethods:
+          - "eth_call"
+          - "eth_getBalance"
+          - "eth_getCode"
+          - "eth_getTransactionByHash"
+          - "eth_getTransactionReceipt"
+          - "eth_getBlockByHash"
+          - "eth_feeHistory"
+          - "eth_gasPrice"
+          - "eth_maxPriorityFeePerGas"
+        maxChunk: 10000
+        timeout: 30s
+
+      # Your normal JSON-RPC upstreams for realtime/state/misc
+      - id: bsc-rpc
+        type: evm
+        endpoint: https://<your-bsc-node>
+        evm:
+          chainId: 56
+
+      - id: base-rpc
+        type: evm
+        endpoint: https://<your-base-node>
+        evm:
+          chainId: 8453
 rateLimiters:
   budgets:
     - id: global-tenderly
