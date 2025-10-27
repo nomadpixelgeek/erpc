@@ -9,7 +9,7 @@ require (
 	github.com/IGLOU-EU/go-wildcard/v2 v2.0.2
 	github.com/aws/aws-sdk-go v1.55.5
 	github.com/blockchain-data-standards/manifesto v0.0.0
-	github.com/bytedance/sonic v1.13.2
+	github.com/bytedance/sonic v1.14.0
 	github.com/dgraph-io/ristretto/v2 v2.2.0
 	github.com/dustin/go-humanize v1.0.1
 	github.com/envoyproxy/go-control-plane/envoy v1.32.4
@@ -57,7 +57,7 @@ require (
 	github.com/alicebob/gopher-json v0.0.0-20230218143504-906a9b012302 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bits-and-blooms/bitset v1.17.0 // indirect
-	github.com/bytedance/sonic/loader v0.2.4 // indirect
+	github.com/bytedance/sonic/loader v0.3.0 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cloudwego/base64x v0.1.5 // indirect
