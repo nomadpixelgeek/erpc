@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
+	"path"
 	"strconv"
 	"strings"
 
@@ -12,9 +14,30 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// Minimal, credential-less vendor for Subsquid public gateways.
-// Works with shorthand endpoints like `subsquid://v2.archive.subsquid.io/network/base-mainnet`
-// after convertUpstreamToProvider() sets settings["endpoint"] to the https URL.
+// Map Subsquid "network slugs" -> EVM chain IDs.
+// Fill this if more networks required to enabled.
+//
+// IMPORTANT: The slug must match the last path segment in the Subsquid URL,
+// e.g. https://v2.archive.subsquid.io/network/base-mainnet -> "base-mainnet".
+var subsquidSlugToChainID = map[string]int64{
+	// Your immediate needs:
+	"base-mainnet":    8453,
+	"base-sepolia":    84532,
+	"binance-mainnet": 56, // Subsquid docs use "binance-mainnet" (not "bsc-mainnet")
+	"binance-testnet": 97,
+
+	// A few common ones (keep or remove as you like):
+	"ethereum-mainnet":  1,
+	"ethereum-sepolia":  11155111,
+	"arbitrum-one":      42161,
+	"optimism-mainnet":  10,
+	"polygon-mainnet":   137,
+	"mantle-mainnet":    5000,
+	"berachain-mainnet": 80094,
+	"mode-mainnet":      34443,
+	"sonic-mainnet":     146,
+	"blast-l2-mainnet":  81457,
+}
 
 type subsquidVendor struct{}
 
@@ -54,38 +77,50 @@ func (v *subsquidVendor) GenerateConfigs(
 		upstream.Endpoint = endpoint
 	}
 
-	// Upstream type is EVM; chainId should be determined by network config, not here.
+	// Upstream type is EVM; chainId comes from the Network, not here.
 	upstream.Type = common.UpstreamTypeEvm
 
 	return []*common.UpstreamConfig{upstream}, nil
 }
 
-// SupportsNetwork gates provider discovery per network.
-// For simplicity, accept any EVM:* network. If you want to restrict, parse chainId.
+// SupportsNetwork attaches this provider only to the Network matching its slug-implied chainId.
 func (v *subsquidVendor) SupportsNetwork(
 	_ context.Context,
 	_ *zerolog.Logger,
-	_ common.VendorSettings,
+	settings common.VendorSettings,
 	networkId string,
 ) (bool, error) {
-	// Expect "evm:<chainId>"
+	// must be "evm:<chainId>"
 	if !strings.HasPrefix(networkId, "evm:") {
 		return false, nil
 	}
-	// If you want to restrict to certain chains, uncomment:
-	// cid, err := strconv.ParseInt(strings.TrimPrefix(networkId, "evm:"), 10, 64)
-	// if err != nil { return false, err }
-	// switch cid {
-	// case 8453, 56: // base, bsc
-	//     return true, nil
-	// default:
-	//     return false, nil
-	// }
-	// Default: allow all EVM networks (provider/upstream selection will filter further).
-	if _, err := strconv.ParseInt(strings.TrimPrefix(networkId, "evm:"), 10, 64); err != nil {
+	cid, err := strconv.ParseInt(strings.TrimPrefix(networkId, "evm:"), 10, 64)
+	if err != nil {
 		return false, err
 	}
-	return true, nil
+
+	// settings["endpoint"] is something like:
+	//   https://v2.archive.subsquid.io/network/base-mainnet
+	endpoint, _ := settings["endpoint"].(string)
+	if endpoint == "" {
+		// If settings are missing, be conservative.
+		return false, nil
+	}
+
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return false, err
+	}
+	// slug = last segment after /network/
+	// path.Clean to normalize, then take base
+	slug := path.Base(path.Clean(u.Path))
+
+	want, ok := subsquidSlugToChainID[strings.ToLower(slug)]
+	if !ok {
+		// Unknown slug; don't attach to any network by default
+		return false, nil
+	}
+	return cid == want, nil
 }
 
 // No vendor-specific error mapping required for public Subsquid gateways.
