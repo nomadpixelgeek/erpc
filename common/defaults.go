@@ -1133,9 +1133,17 @@ func convertUpstreamToProvider(upstream *UpstreamConfig) (*ProviderConfig, error
 
 func buildProviderSettings(vendorName string, endpoint *url.URL) (VendorSettings, error) {
 	switch vendorName {
-	case "subsquid":
+	case "subsquid", "evm+subsquid":
+		// Produce a canonical HTTPS endpoint from the shorthand scheme
+		spec := "https://" + endpoint.Host
+		if endpoint.Path != "" {
+			spec += "/" + strings.TrimPrefix(endpoint.Path, "/")
+		}
+		if endpoint.RawQuery != "" {
+			spec += "?" + endpoint.RawQuery
+		}
 		return VendorSettings{
-			"endpoint": "https://" + endpoint.Host + "/" + strings.TrimPrefix(endpoint.Path, "/"),
+			"endpoint": spec,
 		}, nil
 	case "alchemy", "evm+alchemy":
 		return VendorSettings{
