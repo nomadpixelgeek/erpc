@@ -68,16 +68,30 @@ func (v *subsquidVendor) GenerateConfigs(
 		upstream.JsonRpc = &common.JsonRpcUpstreamConfig{}
 	}
 
-	// Use the resolved https endpoint from buildProviderSettings().
-	if upstream.Endpoint == "" {
-		endpoint, _ := settings["endpoint"].(string)
-		if endpoint == "" {
-			return nil, fmt.Errorf("subsquid vendor requires settings.endpoint (https://v2.archive.subsquid.io/...)")
-		}
-		upstream.Endpoint = endpoint
+	// Use the resolved https endpoint from buildProviderSettings(), but DO NOT
+	// set it as an https:// upstream endpoint. Keep the custom scheme so the
+	// UpstreamsRegistry selects the Subsquid adapter.
+	endpoint, _ := settings["endpoint"].(string)
+	if endpoint == "" {
+		return nil, fmt.Errorf("subsquid vendor requires settings.endpoint (https://v2.archive.subsquid.io/...)")
 	}
 
-	// Upstream type is EVM; chainId comes from the Network, not here.
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("invalid subsquid settings.endpoint: %w", err)
+	}
+
+	// Preserve the vendor-specific scheme on the upstream so the adapter is used.
+	// Example: subsquid://v2.archive.subsquid.io/network/base-mainnet
+	upstream.Endpoint = "subsquid://" + u.Host
+	if p := strings.TrimPrefix(u.Path, "/"); p != "" {
+		upstream.Endpoint += "/" + p
+	}
+	if q := u.RawQuery; q != "" {
+		upstream.Endpoint += "?" + q
+	}
+
+	// Mark as EVM; chainId will be taken from the Network (and already gated with SupportsNetwork).
 	upstream.Type = common.UpstreamTypeEvm
 
 	return []*common.UpstreamConfig{upstream}, nil
