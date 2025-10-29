@@ -36,6 +36,7 @@ type subsquidVendor struct{}
 func CreateSubsquidVendor() common.Vendor { return &subsquidVendor{} }
 func (v *subsquidVendor) Name() string    { return "subsquid" }
 
+// Keep permissive; used only for shorthand inference if ever needed.
 func (v *subsquidVendor) OwnsUpstream(ups *common.UpstreamConfig) bool {
 	if ups == nil {
 		return false
@@ -44,10 +45,6 @@ func (v *subsquidVendor) OwnsUpstream(ups *common.UpstreamConfig) bool {
 	return strings.HasPrefix(ep, "subsquid://") || strings.Contains(ep, ".subsquid.io")
 }
 
-// GenerateConfigs produces final upstream(s) from provider settings.
-// Expect settings["endpoint"] to be an https URL built in buildProviderSettings().
-// IMPORTANT: This works even if settings["endpoint"] is missing.
-// It is reconstructed from upstream.Endpoint when needed.
 func (v *subsquidVendor) GenerateConfigs(
 	_ context.Context,
 	_ *zerolog.Logger,
@@ -58,38 +55,27 @@ func (v *subsquidVendor) GenerateConfigs(
 		upstream.JsonRpc = &common.JsonRpcUpstreamConfig{}
 	}
 
+	// Prefer settings.endpoint injected by buildProviderSettings()
 	httpsEndpoint, _ := settings["endpoint"].(string)
-
 	if httpsEndpoint == "" {
-		// Fallback path: convert subsquid://host/path?query → https://host/path?query
+		// Fallback: if upstream.Endpoint used a custom scheme, convert it to https (do NOT set subsquid://)
 		if upstream.Endpoint == "" {
-			return nil, fmt.Errorf("subsquid vendor requires settings.endpoint (https://v2.archive.subsquid.io/...) or a subsquid:// upstream endpoint")
+			return nil, fmt.Errorf("subsquid vendor requires settings.endpoint (https://v2.archive.subsquid.io/...) or a usable upstream endpoint")
 		}
 		u, err := url.Parse(upstream.Endpoint)
 		if err != nil {
 			return nil, fmt.Errorf("invalid upstream endpoint for subsquid: %w", err)
 		}
-		if !strings.EqualFold(u.Scheme, "subsquid") {
+		if strings.EqualFold(u.Scheme, "subsquid") {
+			u.Scheme = "https"
 			httpsEndpoint = u.String()
 		} else {
-			u.Scheme = "https"
 			httpsEndpoint = u.String()
 		}
 	}
 
-	// Normalize upstream.Endpoint to subsquid:// so the Subsquid adapter is used.
-	u, err := url.Parse(httpsEndpoint)
-	if err != nil {
-		return nil, fmt.Errorf("invalid subsquid settings.endpoint: %w", err)
-	}
-	upstream.Endpoint = "subsquid://" + u.Host
-	if p := strings.TrimPrefix(u.Path, "/"); p != "" {
-		upstream.Endpoint += "/" + p
-	}
-	if u.RawQuery != "" {
-		upstream.Endpoint += "?" + u.RawQuery
-	}
-
+	// IMPORTANT: keep HTTPS; do NOT rewrite to subsquid:// (core transport doesn’t support it)
+	upstream.Endpoint = httpsEndpoint
 	upstream.Type = common.UpstreamTypeEvm
 	return []*common.UpstreamConfig{upstream}, nil
 }
@@ -108,21 +94,15 @@ func (v *subsquidVendor) SupportsNetwork(
 		return false, err
 	}
 
-	// Prefer settings.endpoint, but also recover from upstream endpoint if needed.
-	httpsEndpoint, _ := settings["endpoint"].(string)
-
-	var slug string
-	if httpsEndpoint != "" {
-		if u, err := url.Parse(httpsEndpoint); err == nil {
-			slug = strings.ToLower(path.Base(path.Clean(u.Path)))
-		}
-	}
-	// If settings were empty or unparsable, we can’t easily read the upstream here,
-	// because SupportsNetwork doesn’t receive it. Be conservative in that case.
-	if slug == "" {
+	ep, _ := settings["endpoint"].(string)
+	if ep == "" {
 		return false, nil
 	}
-
+	u, err := url.Parse(ep)
+	if err != nil {
+		return false, nil
+	}
+	slug := strings.ToLower(path.Base(path.Clean(u.Path)))
 	want, ok := subsquidSlugToChainID[slug]
 	if !ok {
 		return false, nil
