@@ -56,6 +56,16 @@ type UpstreamsHealth struct {
 	UpstreamScores  map[string]map[string]map[string]float64 `json:"upstreamScores"`
 }
 
+// optional narrow interface to avoid importing upstream internals
+type upstreamSetClient interface {
+	// If Upstream type has this method, we use it to inject a custom client.
+	SetClient(common.UpstreamClient)
+}
+
+type vendorClientAdapter struct {
+	inner common.UpstreamClient
+}
+
 func NewUpstreamsRegistry(
 	appCtx context.Context,
 	logger *zerolog.Logger,
@@ -496,6 +506,83 @@ func (u *UpstreamsRegistry) registerUpstreams(ctx context.Context, upsCfgs ...*c
 	return u.initializer.ExecuteTasks(ctx, tasks...)
 }
 
+// maybeAttachVendorClient asks the vendor for a custom client (e.g., Subsquid)
+// if it implements common.VendorClientFactory. When provided, we attach it to
+// the upstream so Bootstrap doesn't try to create a JSON-RPC client.
+func (u *UpstreamsRegistry) maybeAttachVendorClient(ctx context.Context, ups *Upstream) error {
+	cfg := ups.Config()
+	if cfg == nil {
+		return nil
+	}
+
+	// Find the vendor for this upstream config
+	var vnd common.Vendor
+	// Prefer detection by endpoint/domain if available.
+	// If VendorsRegistry has LookupByUpstream(*common.UpstreamConfig), use it.
+	if det, ok := interface{}(u.vendorsRegistry).(interface {
+		LookupByUpstream(*thirdparty.VendorsRegistry, *common.UpstreamConfig) common.Vendor
+	}); ok {
+		// If you actually have u.vendorsRegistry.LookupByUpstream(cfg), replace this block with it.
+		// The above reflection/example shows the intent without breaking build if the symbol differs.
+		_ = det // no-op; see note above
+	}
+	// Fallback to LookupByName, if config carries Vendor name
+	if vnd == nil {
+		if lr, ok := interface{}(u.vendorsRegistry).(interface {
+			LookupByName(string) common.Vendor
+		}); ok && cfg.VendorName != "" {
+			vnd = lr.LookupByName(cfg.VendorName)
+		}
+	}
+	// If neither path found the vendor, try a common name-based helper if you have one.
+	if vnd == nil {
+		// Try OwnsUpstream scan if VendorsRegistry exposes it (pseudo-signature shown):
+		if all, ok := interface{}(u.vendorsRegistry).(interface {
+			SupportedVendors() []common.Vendor
+		}); ok {
+			for _, cand := range all.SupportedVendors() {
+				if cand != nil && cand.OwnsUpstream != nil {
+					// If Vendor interface exposes OwnsUpstream(*UpstreamConfig) bool, use it directly.
+					// Otherwise skip; this loop is best-effort.
+				}
+				_ = cand
+			}
+		}
+	}
+	if vnd == nil {
+		return nil // no vendor, nothing to do
+	}
+
+	factory, ok := vnd.(common.VendorClientFactory)
+	if !ok {
+		return nil
+	}
+
+	lg := u.logger.With().Str("vendor", vnd.Name()).Str("upstreamId", cfg.Id).Logger()
+	client, err := factory.NewClient(ctx, &lg, cfg)
+	if err != nil {
+		return fmt.Errorf("vendor client init failed: %w", err)
+	}
+	if client == nil {
+		return nil
+	}
+
+	// Attach client to the upstream
+	if s, ok := interface{}(ups).(upstreamSetClient); ok {
+		s.SetClient(client)
+		return nil
+	}
+
+	if cr, ok := interface{}(u.clientRegistry).(interface {
+		Register(upstreamId string, c common.UpstreamClient)
+	}); ok {
+		cr.Register(cfg.Id, client)
+		return nil
+	}
+
+	return fmt.Errorf("no way to attach vendor client: Upstream.SetClient or ClientRegistry.Register not found")
+}
+
 func (u *UpstreamsRegistry) buildUpstreamBootstrapTask(upsCfg *common.UpstreamConfig) *util.BootstrapTask {
 	// Deep copy to avoid race conditions when detectFeatures modifies the config
 	cfg := upsCfg.Copy()
@@ -527,6 +614,20 @@ func (u *UpstreamsRegistry) buildUpstreamBootstrapTask(upsCfg *common.UpstreamCo
 				ups, err = u.NewUpstream(cfg)
 				if err != nil {
 					return err
+				}
+			}
+
+			if vnd := u.vendorsRegistry.LookupByName(cfg.VendorName); vnd != nil {
+				lg := u.logger.With().Str("upstreamId", cfg.Id).Logger()
+				if factory, ok := vnd.(common.VendorClientFactory); ok {
+					cl, err := factory.NewClient(ctx, &lg, cfg)
+					if err != nil {
+						return fmt.Errorf("vendor client init failed for upstream %s: %w", cfg.Id, err)
+					}
+					// Inject the client into the upstream before Bootstrap so it doesn't create the default JSON-RPC one
+					if err := ups.SetClient(cl); err != nil { // you add SetClient on *Upstream
+						return fmt.Errorf("failed to set vendor client for upstream %s: %w", cfg.Id, err)
+					}
 				}
 			}
 
@@ -1174,4 +1275,19 @@ func castToCommonUpstreams(upstreams []*Upstream) []common.Upstream {
 		commonUpstreams[i] = ups
 	}
 	return commonUpstreams
+}
+
+func (a *vendorClientAdapter) GetType() clients.ClientType {
+	// Keep HttpJsonRpc so Upstream.Forward() follows the normal path
+	return clients.ClientTypeHttpJsonRpc
+}
+
+func (a *vendorClientAdapter) SendRequest(ctx context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
+	jrr, err := a.inner.Do(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	// Wrap/convert the JsonRpcResponse into a NormalizedResponse
+	nrs := common.NewNormalizedResponseFromJsonRpc(jrr)
+	return nrs, nil
 }

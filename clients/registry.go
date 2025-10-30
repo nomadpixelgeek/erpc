@@ -17,6 +17,27 @@ const (
 	ClientTypeGrpcBds     ClientType = "GrpcBds"
 )
 
+// --- Adapter to wrap an injected common.UpstreamClient into a ClientInterface ---
+
+type vendorClientAdapter struct {
+	inner common.UpstreamClient
+}
+
+// We deliberately return HttpJsonRpc here so Upstream.Forward() goes through the
+// existing code path that handles ClientTypeHttpJsonRpc / ClientTypeGrpcBds.
+// The actual transport is implemented by the vendor client itself.
+func (a *vendorClientAdapter) GetType() ClientType {
+	return ClientTypeHttpJsonRpc
+}
+
+func (a *vendorClientAdapter) SendRequest(ctx context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
+	jrr, err := a.inner.Do(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	return common.NewNormalizedResponseFromJsonRpc(jrr), nil
+}
+
 type ClientInterface interface {
 	GetType() ClientType
 	SendRequest(ctx context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error)
@@ -48,7 +69,6 @@ func (manager *ClientRegistry) GetOrCreateClient(appCtx context.Context, ups com
 	if client, ok := manager.clients.Load(common.UniqueUpstreamKey(ups)); ok {
 		return client.(ClientInterface), nil
 	}
-
 	return manager.CreateClient(appCtx, ups)
 }
 
@@ -59,6 +79,20 @@ func (manager *ClientRegistry) CreateClient(appCtx context.Context, ups common.U
 
 	cfg := ups.Config()
 
+	// 🔹 First, check if the upstream already has an injected vendor client.
+	// We look for a narrow interface to avoid importing upstream package here.
+	type upstreamWithInjectedClient interface {
+		InjectedClient() common.UpstreamClient
+	}
+	if uwi, ok := ups.(upstreamWithInjectedClient); ok {
+		if injected := uwi.InjectedClient(); injected != nil {
+			adapted := &vendorClientAdapter{inner: injected}
+			manager.clients.Store(common.UniqueUpstreamKey(ups), adapted)
+			return adapted, nil
+		}
+	}
+
+	// 🔸 Fallback: build a client based on endpoint (existing behavior).
 	if cfg.Endpoint == "" {
 		return nil, fmt.Errorf("upstream endpoint is required")
 	}
@@ -113,7 +147,6 @@ func (manager *ClientRegistry) CreateClient(appCtx context.Context, ups common.U
 				} else {
 					clientErr = fmt.Errorf("unsupported endpoint scheme: %v for upstream: %v", parsedUrl.Scheme, cfg.Id)
 				}
-
 			default:
 				clientErr = fmt.Errorf("unsupported upstream type: %v for upstream: %v", cfg.Type, cfg.Id)
 			}

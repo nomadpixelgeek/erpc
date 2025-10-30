@@ -56,6 +56,8 @@ type Upstream struct {
 	rateLimitersRegistry *RateLimitersRegistry
 	rateLimiterAutoTuner *RateLimitAutoTuner
 	evmStatePoller       common.EvmStatePoller
+
+	client common.UpstreamClient
 }
 
 func NewUpstream(
@@ -148,6 +150,21 @@ func NewUpstream(
 	lg = pup.logger.With().Str("vendorName", pup.VendorName()).Logger()
 	pup.logger = &lg
 
+	// let vendor provide a custom client (Subsquid path)
+	if vn != nil {
+		if factory, ok := vn.(common.VendorClientFactory); ok {
+			cl, err := factory.NewClient(appCtx, &lg, pup.config)
+			if err != nil {
+				return nil, fmt.Errorf("vendor client init failed for upstream %s: %w", pup.config.Id, err)
+			}
+			if err := pup.SetClient(cl); err != nil {
+				return nil, fmt.Errorf("failed to set vendor client for upstream %s: %w", pup.config.Id, err)
+			}
+		}
+	}
+
+	// Existing: build the high-level client via registry.
+	// If the registry supports using u.client when pre-set, it will wrap it.
 	if client, err := cr.GetOrCreateClient(appCtx, pup); err != nil {
 		return nil, err
 	} else {
@@ -676,6 +693,11 @@ func (u *Upstream) Executor() failsafe.Executor[*common.NormalizedResponse] {
 
 // TODO move to evm package
 func (u *Upstream) EvmGetChainId(ctx context.Context) (string, error) {
+	// trust configured chainId if present
+	if u.config != nil && u.config.Evm != nil && u.config.Evm.ChainId > 0 {
+		return strconv.FormatInt(u.config.Evm.ChainId, 10), nil
+	}
+
 	pr := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":75412,"method":"eth_chainId","params":[]}`))
 
 	resp, err := u.Forward(ctx, pr, true)
@@ -1023,6 +1045,17 @@ func (u *Upstream) detectFeatures(ctx context.Context) error {
 		if cfg.Evm == nil {
 			cfg.Evm = &common.EvmUpstreamConfig{}
 		}
+
+		// if chainId is explicitly configured, TRUST IT and skip the probe
+		if cfg.Evm.ChainId > 0 {
+			u.networkId.Store(util.EvmNetworkId(cfg.Evm.ChainId))
+			if cfg.Evm.MaxAvailableRecentBlocks == 0 && cfg.Evm.NodeType == common.EvmNodeTypeFull {
+				cfg.Evm.MaxAvailableRecentBlocks = 128
+			}
+			return nil
+		}
+
+		// detect via RPC when not configured
 		nid, err := u.EvmGetChainId(ctx)
 		if err != nil {
 			return common.NewErrUpstreamClientInitialization(
@@ -1200,4 +1233,16 @@ func (u *Upstream) Cordon(method string, reason string) {
 
 func (u *Upstream) Uncordon(method string, reason string) {
 	u.metricsTracker.Uncordon(u, method, reason)
+}
+
+func (u *Upstream) SetClient(c common.UpstreamClient) error {
+	if c == nil {
+		return fmt.Errorf("nil client")
+	}
+	u.client = c
+	return nil
+}
+
+func (u *Upstream) InjectedClient() common.UpstreamClient {
+	return u.client
 }
