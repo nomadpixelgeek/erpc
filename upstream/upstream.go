@@ -183,14 +183,14 @@ func (u *Upstream) Bootstrap(ctx context.Context) error {
 	}
 
 	if u.config.Type == common.UpstreamTypeEvm {
-		u.evmStatePoller = evm.NewEvmStatePoller(u.ProjectId, u.appCtx, u.logger, u, u.metricsTracker, u.sharedStateRegistry)
+		// SKIP poller for archive-only vendors (Subsquid) to avoid eth_* probes
+		if !u.isArchiveOnlyVendor() {
+			u.evmStatePoller = evm.NewEvmStatePoller(u.ProjectId, u.appCtx, u.logger, u, u.metricsTracker, u.sharedStateRegistry)
+		}
 	}
 
 	if u.evmStatePoller != nil {
-		err = u.evmStatePoller.Bootstrap(ctx)
-		if err != nil {
-			// The reason we're not returning error is to allow upstream to still be registered
-			// even if background block polling fails initially.
+		if err := u.evmStatePoller.Bootstrap(ctx); err != nil {
 			u.logger.Error().Err(err).Msg("failed on initial bootstrap of evm state poller (will retry in background)")
 		}
 	}
@@ -1397,4 +1397,19 @@ func (u *Upstream) SetClient(c common.UpstreamClient) error {
 
 func (u *Upstream) InjectedClient() common.UpstreamClient {
 	return u.client
+}
+
+func (u *Upstream) isArchiveOnlyVendor() bool {
+	// Heuristics: vendor named subsquid OR ignoreMethods:* (no JSON-RPC)
+	if u.vendor != nil && strings.EqualFold(u.vendor.Name(), "subsquid") {
+		return true
+	}
+	u.cfgMu.RLock()
+	defer u.cfgMu.RUnlock()
+	for _, m := range u.config.IgnoreMethods {
+		if m == "*" {
+			return true
+		}
+	}
+	return false
 }

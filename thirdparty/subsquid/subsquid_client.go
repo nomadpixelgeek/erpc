@@ -79,7 +79,12 @@ func (c *SubsquidClient) SendRequest(ctx context.Context, req *common.Normalized
 
 	default:
 		// Tell router this upstream doesn't handle the method -> fallback
-		return nil, common.NewErrEndpointUnsupported(fmt.Errorf("method %q not supported by upstream %q", method, c.upstream.Id()))
+		// return nil, common.NewErrEndpointUnsupported(fmt.Errorf("method %q not supported by upstream %q", method, c.upstream.Id()))
+		// Using the standard “skipped” error ensures Forward() treats it correctly.
+		return nil, common.NewErrUpstreamRequestSkipped(
+			common.NewErrUpstreamMethodIgnored(method, c.upstream.Id()),
+			c.upstream.Id(),
+		)
 	}
 }
 
