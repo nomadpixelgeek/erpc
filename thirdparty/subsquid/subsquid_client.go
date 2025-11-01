@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -81,7 +83,7 @@ func (c *SubsquidClient) SendRequest(ctx context.Context, req *common.Normalized
 	}
 }
 
-// ---------- Phase 2: eth_getLogs ----------
+// ---------- eth_getLogs ----------
 
 type getLogsParams struct {
 	FromBlock interface{}   `json:"fromBlock,omitempty"`
@@ -268,7 +270,7 @@ query($where: LogsBoolExp, $limit: Int, $after: String) {
 	return nr, nil
 }
 
-// ---------- Phase 3: stubs to fill later ----------
+// ---------- eth_getTransactionByHash ----------
 
 func (c *SubsquidClient) handleEthGetTransactionByHash(ctx context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 	jrq, err := req.JsonRpcRequest(ctx)
@@ -279,12 +281,99 @@ func (c *SubsquidClient) handleEthGetTransactionByHash(ctx context.Context, req 
 	if err != nil || hashI == nil {
 		return nil, fmt.Errorf("missing tx hash")
 	}
-	_ = toLowerHex(hashI.(string))
+	txHash := toLowerHex(hashI.(string))
 
-	// TODO: Build GQL, map to JSON-RPC transaction object
-	jrr, _ := common.NewJsonRpcResponse(jrq.ID, nil, nil)
+	// GraphQL: pull a single transaction by hash
+	query := `
+query($hash: String!) {
+  transactions: transactions(where: { hash_eq: $hash }, limit: 1) {
+    edges {
+      node {
+        hash
+        from
+        to
+        value
+        input
+        nonce
+        gas
+        gasPrice
+        blockNumber
+        blockHash
+        transactionIndex
+        r
+        s
+        v
+      }
+    }
+  }
+}
+`
+
+	type txNode struct {
+		Hash             string  `json:"hash"`
+		From             string  `json:"from"`
+		To               *string `json:"to"`
+		Value            string  `json:"value"` // often decimal as string
+		Input            string  `json:"input"`
+		Nonce            uint64  `json:"nonce"`
+		Gas              uint64  `json:"gas"`
+		GasPrice         string  `json:"gasPrice"` // decimal as string
+		BlockNumber      uint64  `json:"blockNumber"`
+		BlockHash        string  `json:"blockHash"`
+		TransactionIndex uint64  `json:"transactionIndex"`
+		R                string  `json:"r"`
+		S                string  `json:"s"`
+		V                uint64  `json:"v"`
+	}
+	var gqlResp struct {
+		Data struct {
+			Transactions struct {
+				Edges []struct {
+					Node txNode `json:"node"`
+				} `json:"edges"`
+			} `json:"transactions"`
+		} `json:"data"`
+	}
+
+	if err := c.postGraphQL(ctx, query, map[string]any{"hash": strings.ToLower(txHash)}, &gqlResp); err != nil {
+		return nil, err
+	}
+	if len(gqlResp.Data.Transactions.Edges) == 0 {
+		// JSON-RPC returns null if not found
+		jrr, _ := common.NewJsonRpcResponse(jrq.ID, nil, nil)
+		return common.NewNormalizedResponse().WithRequest(req).WithJsonRpcResponse(jrr), nil
+	}
+	t := gqlResp.Data.Transactions.Edges[0].Node
+
+	out := map[string]any{
+		"hash":             toLowerHex(t.Hash),
+		"nonce":            toHexU64(t.Nonce),
+		"blockHash":        toLowerHex(t.BlockHash),
+		"blockNumber":      toHexU64(t.BlockNumber),
+		"transactionIndex": toHexU64(t.TransactionIndex),
+		"from":             toLowerHex(t.From),
+		"to":               nilIfEmptyHex(t.To),
+		"value":            toHexBigFromString(t.Value),
+		"gas":              toHexU64(t.Gas),
+		"gasPrice":         toHexBigFromString(t.GasPrice),
+		"input":            ensure0x(t.Input),
+		// ECDSA fields
+		"r": ensure0x(t.R),
+		"s": ensure0x(t.S),
+		"v": toHexU64(t.V),
+		// Optional fields (commonly present but may be null in some archives)
+		"type":                 nil, // fill if archive exposes it
+		"chainId":              nil, // fill if available
+		"maxFeePerGas":         nil,
+		"maxPriorityFeePerGas": nil,
+		// YParity (EIP-1559/2930) could be derived from v in some contexts; leaving null here.
+	}
+
+	jrr, _ := common.NewJsonRpcResponse(jrq.ID, out, nil)
 	return common.NewNormalizedResponse().WithRequest(req).WithJsonRpcResponse(jrr), nil
 }
+
+// ---------- eth_getTransactionReceipt ----------
 
 func (c *SubsquidClient) handleEthGetTransactionReceipt(ctx context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 	jrq, err := req.JsonRpcRequest(ctx)
@@ -295,20 +384,353 @@ func (c *SubsquidClient) handleEthGetTransactionReceipt(ctx context.Context, req
 	if err != nil || hashI == nil {
 		return nil, fmt.Errorf("missing tx hash")
 	}
-	_ = toLowerHex(hashI.(string))
+	txHash := toLowerHex(hashI.(string))
 
-	// TODO: Build GQL join, map to JSON-RPC receipt (all integers -> 0x hex)
-	jrr, _ := common.NewJsonRpcResponse(jrq.ID, nil, nil)
+	// GraphQL: single transaction joined with receipt-ish fields + logs
+	query := `
+query($hash: String!) {
+  transactions: transactions(where: { hash_eq: $hash }, limit: 1) {
+    edges {
+      node {
+        hash
+        from
+        to
+        contractAddress
+        status
+        blockNumber
+        blockHash
+        transactionIndex
+        cumulativeGasUsed
+        gasUsed
+        effectiveGasPrice
+        logs {
+          address
+          data
+          topics
+          index
+          blockNumber
+          blockHash
+          transactionIndex
+          transactionHash
+        }
+      }
+    }
+  }
+}
+`
+
+	type logNode struct {
+		Address          string   `json:"address"`
+		Data             string   `json:"data"`
+		Topics           []string `json:"topics"`
+		Index            uint64   `json:"index"`
+		BlockNumber      uint64   `json:"blockNumber"`
+		BlockHash        string   `json:"blockHash"`
+		TransactionIndex uint64   `json:"transactionIndex"`
+		TransactionHash  string   `json:"transactionHash"`
+	}
+	type recNode struct {
+		Hash              string    `json:"hash"`
+		From              string    `json:"from"`
+		To                *string   `json:"to"`
+		ContractAddress   *string   `json:"contractAddress"`
+		Status            any       `json:"status"` // some archives expose bool, others 0/1
+		BlockNumber       uint64    `json:"blockNumber"`
+		BlockHash         string    `json:"blockHash"`
+		TransactionIndex  uint64    `json:"transactionIndex"`
+		CumulativeGasUsed uint64    `json:"cumulativeGasUsed"`
+		GasUsed           uint64    `json:"gasUsed"`
+		EffectiveGasPrice string    `json:"effectiveGasPrice"` // decimal as string (often)
+		Logs              []logNode `json:"logs"`
+	}
+	var gqlResp struct {
+		Data struct {
+			Transactions struct {
+				Edges []struct {
+					Node recNode `json:"node"`
+				} `json:"edges"`
+			} `json:"transactions"`
+		} `json:"data"`
+	}
+
+	if err := c.postGraphQL(ctx, query, map[string]any{"hash": strings.ToLower(txHash)}, &gqlResp); err != nil {
+		return nil, err
+	}
+	if len(gqlResp.Data.Transactions.Edges) == 0 {
+		// JSON-RPC returns null if not found
+		jrr, _ := common.NewJsonRpcResponse(jrq.ID, nil, nil)
+		return common.NewNormalizedResponse().WithRequest(req).WithJsonRpcResponse(jrr), nil
+	}
+	rx := gqlResp.Data.Transactions.Edges[0].Node
+
+	// Map logs
+	outLogs := make([]map[string]any, 0, len(rx.Logs))
+	for _, lg := range rx.Logs {
+		outLogs = append(outLogs, map[string]any{
+			"address":          toLowerHex(lg.Address),
+			"topics":           toLowerHexSlice(lg.Topics),
+			"data":             ensure0x(lg.Data),
+			"blockNumber":      toHexU64(lg.BlockNumber),
+			"blockHash":        toLowerHex(lg.BlockHash),
+			"transactionHash":  toLowerHex(lg.TransactionHash),
+			"transactionIndex": toHexU64(lg.TransactionIndex),
+			"logIndex":         toHexU64(lg.Index),
+			"removed":          false,
+		})
+	}
+
+	statusHex := "0x0"
+	switch v := rx.Status.(type) {
+	case bool:
+		if v {
+			statusHex = "0x1"
+		}
+	case float64:
+		if uint64(v) != 0 {
+			statusHex = "0x1"
+		}
+	case int:
+		if v != 0 {
+			statusHex = "0x1"
+		}
+	case string:
+		// accept "1"/"0"
+		if v == "1" {
+			statusHex = "0x1"
+		}
+	}
+
+	out := map[string]any{
+		"transactionHash":   toLowerHex(rx.Hash),
+		"transactionIndex":  toHexU64(rx.TransactionIndex),
+		"blockHash":         toLowerHex(rx.BlockHash),
+		"blockNumber":       toHexU64(rx.BlockNumber),
+		"from":              toLowerHex(rx.From),
+		"to":                nilIfEmptyHex(rx.To),
+		"cumulativeGasUsed": toHexU64(rx.CumulativeGasUsed),
+		"gasUsed":           toHexU64(rx.GasUsed),
+		"contractAddress":   nilIfEmptyHex(rx.ContractAddress),
+		"logs":              outLogs,
+		"logsBloom":         nil, // fill if archive exposes it
+		"status":            statusHex,
+		"effectiveGasPrice": toHexBigFromString(rx.EffectiveGasPrice),
+		"type":              nil, // optional
+	}
+
+	jrr, _ := common.NewJsonRpcResponse(jrq.ID, out, nil)
 	return common.NewNormalizedResponse().WithRequest(req).WithJsonRpcResponse(jrr), nil
 }
+
+// ---------- eth_getBlockByHash / eth_getBlockByNumber ----------
 
 func (c *SubsquidClient) handleEthGetBlock(ctx context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 	jrq, err := req.JsonRpcRequest(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("parse json-rpc request: %w", err)
 	}
-	// TODO: detect hash vs number, fetch block, respect fullTx flag
-	jrr, _ := common.NewJsonRpcResponse(jrq.ID, nil, nil)
+	method, _ := req.Method()
+
+	var (
+		byHash bool
+	)
+	switch method {
+	case "eth_getBlockByHash":
+		byHash = true
+	case "eth_getBlockByNumber":
+		byHash = false
+	default:
+		return nil, fmt.Errorf("unsupported block method: %s", method)
+	}
+
+	fullTx := false
+	if fv, err := jrq.PeekByPath(1); err == nil && fv != nil {
+		if b, ok := fv.(bool); ok {
+			fullTx = b
+		}
+	}
+
+	var where map[string]any = map[string]any{}
+	if byHash {
+		hashI, err := jrq.PeekByPath(0)
+		if err != nil || hashI == nil {
+			return nil, fmt.Errorf("missing block hash")
+		}
+		where["hash_eq"] = toLowerHex(hashI.(string))
+	} else {
+		refI, err := jrq.PeekByPath(0)
+		if err != nil || refI == nil {
+			return nil, fmt.Errorf("missing block number ref")
+		}
+		if n, ok := normalizeBlockRef(refI); ok {
+			where["number_eq"] = int64(n)
+		} else {
+			// latest/earliest not supported here -> null
+			jrr, _ := common.NewJsonRpcResponse(jrq.ID, nil, nil)
+			return common.NewNormalizedResponse().WithRequest(req).WithJsonRpcResponse(jrr), nil
+		}
+	}
+
+	// Two variants of selection set based on fullTx
+	var txSel string
+	if fullTx {
+		txSel = `
+        transactions(limit: 10000, orderBy: [INDEX_ASC]) {
+          edges { node {
+            hash
+            from
+            to
+            value
+            input
+            nonce
+            gas
+            gasPrice
+            transactionIndex
+            r
+            s
+            v
+          } }
+        }`
+	} else {
+		txSel = `
+        transactions(limit: 10000, orderBy: [INDEX_ASC]) {
+          edges { node { hash } }
+        }`
+	}
+
+	query := fmt.Sprintf(`
+query($where: BlocksBoolExp!) {
+  blocks: blocks(where: $where, limit: 1) {
+    edges {
+      node {
+        number
+        hash
+        parentHash
+        timestamp
+        miner
+        gasLimit
+        gasUsed
+        baseFeePerGas
+        %s
+      }
+    }
+  }
+}
+`, txSel)
+
+	type txNode struct {
+		Hash             string  `json:"hash"`
+		From             string  `json:"from"`
+		To               *string `json:"to"`
+		Value            string  `json:"value"`
+		Input            string  `json:"input"`
+		Nonce            uint64  `json:"nonce"`
+		Gas              uint64  `json:"gas"`
+		GasPrice         string  `json:"gasPrice"`
+		TransactionIndex uint64  `json:"transactionIndex"`
+		R                string  `json:"r"`
+		S                string  `json:"s"`
+		V                uint64  `json:"v"`
+	}
+	type blkNode struct {
+		Number        uint64 `json:"number"`
+		Hash          string `json:"hash"`
+		ParentHash    string `json:"parentHash"`
+		Timestamp     uint64 `json:"timestamp"`
+		Miner         string `json:"miner"`
+		GasLimit      uint64 `json:"gasLimit"`
+		GasUsed       uint64 `json:"gasUsed"`
+		BaseFeePerGas string `json:"baseFeePerGas"`
+		Transactions  struct {
+			Edges []struct {
+				Node txNode `json:"node"`
+			} `json:"edges"`
+		} `json:"transactions"`
+	}
+	var gqlResp struct {
+		Data struct {
+			Blocks struct {
+				Edges []struct {
+					Node blkNode `json:"node"`
+				} `json:"edges"`
+			} `json:"blocks"`
+		} `json:"data"`
+	}
+
+	if err := c.postGraphQL(ctx, query, map[string]any{"where": where}, &gqlResp); err != nil {
+		return nil, err
+	}
+	if len(gqlResp.Data.Blocks.Edges) == 0 {
+		jrr, _ := common.NewJsonRpcResponse(jrq.ID, nil, nil)
+		return common.NewNormalizedResponse().WithRequest(req).WithJsonRpcResponse(jrr), nil
+	}
+	b := gqlResp.Data.Blocks.Edges[0].Node
+
+	var txs any
+	if fullTx {
+		list := make([]map[string]any, 0, len(b.Transactions.Edges))
+		for _, e := range b.Transactions.Edges {
+			t := e.Node
+			list = append(list, map[string]any{
+				"hash":                 toLowerHex(t.Hash),
+				"nonce":                toHexU64(t.Nonce),
+				"blockHash":            toLowerHex(b.Hash),
+				"blockNumber":          toHexU64(b.Number),
+				"transactionIndex":     toHexU64(t.TransactionIndex),
+				"from":                 toLowerHex(t.From),
+				"to":                   nilIfEmptyHex(t.To),
+				"value":                toHexBigFromString(t.Value),
+				"gas":                  toHexU64(t.Gas),
+				"gasPrice":             toHexBigFromString(t.GasPrice),
+				"input":                ensure0x(t.Input),
+				"r":                    ensure0x(t.R),
+				"s":                    ensure0x(t.S),
+				"v":                    toHexU64(t.V),
+				"type":                 nil,
+				"chainId":              nil,
+				"maxFeePerGas":         nil,
+				"maxPriorityFeePerGas": nil,
+			})
+		}
+		txs = list
+	} else {
+		// Only hashes
+		list := make([]string, 0, len(b.Transactions.Edges))
+		for _, e := range b.Transactions.Edges {
+			list = append(list, toLowerHex(e.Node.Hash))
+		}
+		txs = list
+	}
+
+	out := map[string]any{
+		"number":                toHexU64(b.Number),
+		"hash":                  toLowerHex(b.Hash),
+		"parentHash":            toLowerHex(b.ParentHash),
+		"nonce":                 nil,        // not usually in archives
+		"sha3Uncles":            []string{}, // archives typically don’t expose uncles; return empty array
+		"logsBloom":             nil,
+		"transactionsRoot":      nil,
+		"stateRoot":             nil,
+		"miner":                 toLowerHex(b.Miner),
+		"difficulty":            "0x0",
+		"totalDifficulty":       nil,
+		"extraData":             "0x",
+		"size":                  nil, // optional
+		"gasLimit":              toHexU64(b.GasLimit),
+		"gasUsed":               toHexU64(b.GasUsed),
+		"timestamp":             toHexU64(b.Timestamp),
+		"transactions":          txs,
+		"uncles":                []string{},
+		"baseFeePerGas":         toHexBigFromString(b.BaseFeePerGas),
+		"mixHash":               nil,
+		"receiptsRoot":          nil,
+		"withdrawalsRoot":       nil,
+		"withdrawals":           nil,
+		"blobGasUsed":           nil,
+		"excessBlobGas":         nil,
+		"parentBeaconBlockRoot": nil,
+	}
+
+	jrr, _ := common.NewJsonRpcResponse(jrq.ID, out, nil)
 	return common.NewNormalizedResponse().WithRequest(req).WithJsonRpcResponse(jrr), nil
 }
 
@@ -523,4 +945,46 @@ func toHexU64(u uint64) string {
 		return "0x0"
 	}
 	return fmt.Sprintf("0x%x", u)
+}
+
+// Converts optional *string hex address to either lower-hex or nil.
+func nilIfEmptyHex(p *string) any {
+	if p == nil {
+		return nil
+	}
+	s := strings.TrimSpace(*p)
+	if s == "" || s == "0x" || s == "0x0" {
+		return nil
+	}
+	return toLowerHex(s)
+}
+
+func toHexBigFromString(s string) string {
+	// Accept already-hex
+	if strings.HasPrefix(s, "0x") || strings.HasPrefix(s, "0X") {
+		// normalize case/prefix
+		if s == "0x" || s == "0x0" || s == "" {
+			return "0x0"
+		}
+		return strings.ToLower(s)
+	}
+	// Treat empty as zero
+	if strings.TrimSpace(s) == "" {
+		return "0x0"
+	}
+	// Decimal -> hex
+	var z big.Int
+	if _, ok := z.SetString(s, 10); ok {
+		if z.Sign() == 0 {
+			return "0x0"
+		}
+		return "0x" + strings.ToLower(z.Text(16))
+	}
+	// Fallback: try parse as integer-ish float64 string
+	if f, err := strconv.ParseFloat(s, 64); err == nil {
+		u := uint64(f)
+		return toHexU64(u)
+	}
+	// Last resort
+	return "0x0"
 }
